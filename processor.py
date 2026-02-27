@@ -1,46 +1,56 @@
-import fitz  # PyMuPDF: Library for PDF text extraction
+import fitz  # PyMuPDF: Handling PDF text extraction
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# 1. Loading the SBERT Model
-# Using 'all-MiniLM-L6-v2' - a lightweight and high-speed model for semantic embeddings.
-# This model converts text into numerical vectors representing contextual meaning.
+# Initialize SBERT model for Semantic Analysis
+# Model: all-MiniLM-L6-v2 (Efficient for real-time sentence embeddings)
 model = SentenceTransformer('all-MiniLM-L6-v2')
-
 
 def extract_text_from_pdf(pdf_file):
     """
-    Extracts all unstructured text from a given PDF file object.
-    This is used for reading resumes uploaded by the user.
+    Reads the uploaded PDF file and converts it into plain text.
+    Processing step: Iterates through each page and cleans the text.
     """
     try:
-        # Open the PDF from the uploaded byte stream
+        # Stream the file content directly into fitz
         doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-        text = ""
-        # Iterate through each page to aggregate all text content
+        text_content = ""
         for page in doc:
-            text += page.get_text()
+            text_content += page.get_text()
         doc.close()
-        return text
-    except Exception as e:
-        return f"Error reading PDF: {e}"
-
+        return text_content
+    except Exception as error:
+        return f"Extraction Error: {error}"
 
 def calculate_match_score(resume_text, jd_text):
     """
-    Calculates the semantic similarity between the Resume and Job Description (JD).
-    Uses SBERT embeddings and Cosine Similarity for the comparison.
+    Compares Resume content with Job Description using Vector Space Modeling.
+    Algorithm: SBERT Embeddings + Cosine Similarity.
     """
     if not resume_text or not jd_text:
         return 0.0
 
-    # Convert text inputs into numerical vectors (Embeddings)
-    #
-    embeddings = model.encode([resume_text, jd_text])
+    # Encoding text into high-dimensional numerical vectors
+    text_vectors = model.encode([resume_text, jd_text])
 
-    # Apply Cosine Similarity to find the degree of alignment between the two vectors
-    similarity = cosine_similarity([embeddings[0]], [embeddings[1]])
+    # Calculating the mathematical similarity between the two vectors
+    match_calculation = cosine_similarity([text_vectors[0]], [text_vectors[1]])
 
-    # Convert result to percentage and round to 2 decimal places
-    score = round(float(similarity[0][0]) * 100, 2)
-    return score
+    # Format result as a percentage for the UI
+    final_score = round(float(match_calculation[0][0]) * 100, 2)
+    return final_score
+
+def find_missing_skills(resume_text, jd_text):
+    """
+    Performs a keyword gap analysis to find missing requirements.
+    Logic: Uses set difference (JD Keywords - Resume Keywords).
+    """
+    # Text Normalization: converting to lowercase and tokenizing
+    resume_tokens = set(resume_text.lower().split())
+    jd_tokens = set(jd_text.lower().split())
+
+    # Identify tokens present in JD but absent in Resume
+    missing_elements = jd_tokens - resume_tokens
+
+    # Returning top 10 relevant keywords for optimization
+    return list(missing_elements)[:10]
