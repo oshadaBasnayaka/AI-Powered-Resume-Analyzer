@@ -1,56 +1,71 @@
-import fitz  # PyMuPDF: Handling PDF text extraction
+import fitz  # PyMuPDF: Standard library for extracting raw text from document streams
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+import re  # Used for regex-based text tokenization and cleaning
 
-# Initialize SBERT model for Semantic Analysis
-# Model: all-MiniLM-L6-v2 (Efficient for real-time sentence embeddings)
+# Global Initialization of the SBERT Engine
+# We use 'all-MiniLM-L6-v2' because it provides a good balance between speed and semantic accuracy
+# Unlike standard keyword matching, this model captures the contextual meaning of phrases
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def extract_text_from_pdf(pdf_file):
     """
-    Reads the uploaded PDF file and converts it into plain text.
-    Processing step: Iterates through each page and cleans the text.
+    Core NLP Module: Resume Parser
+    Handles the initial data extraction layer. It converts unstructured PDF bytes into
+    normalized plain text to be consumed by the analysis models.
     """
     try:
-        # Stream the file content directly into fitz
+        # Directly reading from the uploaded file stream
         doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
         text_content = ""
+        # Iterating through pages to aggregate the full document content
         for page in doc:
             text_content += page.get_text()
         doc.close()
-        return text_content
+
+        # Whitespace normalization to ensure clean tokenization in later stages
+        cleaned_text = " ".join(text_content.split())
+        return cleaned_text
     except Exception as error:
         return f"Extraction Error: {error}"
 
 def calculate_match_score(resume_text, jd_text):
     """
-    Compares Resume content with Job Description using Vector Space Modeling.
-    Algorithm: SBERT Embeddings + Cosine Similarity.
+    Module: Comparative Analysis Model (ML Tier)
+    Calculates a semantic similarity percentage between the candidate's profile and the JD.
     """
     if not resume_text or not jd_text:
         return 0.0
 
-    # Encoding text into high-dimensional numerical vectors
+    # Transformation: Converting text into high-dimensional numerical vectors (embeddings)
+    # This allows the system to understand that different words can have similar meanings
     text_vectors = model.encode([resume_text, jd_text])
 
-    # Calculating the mathematical similarity between the two vectors
+    # Applying Cosine Similarity to measure the distance between the two semantic vectors
+    # This identifies overlaps in experience even if the exact terminology differs
     match_calculation = cosine_similarity([text_vectors[0]], [text_vectors[1]])
 
-    # Format result as a percentage for the UI
+    # Converting the raw similarity coefficient into a user-friendly percentage
     final_score = round(float(match_calculation[0][0]) * 100, 2)
     return final_score
 
 def find_missing_skills(resume_text, jd_text):
     """
-    Performs a keyword gap analysis to find missing requirements.
-    Logic: Uses set difference (JD Keywords - Resume Keywords).
+    Module: Skill Gap Identification
+    This function dissects the JD to find critical requirements that are absent
+    from the candidate's resume.
     """
-    # Text Normalization: converting to lowercase and tokenizing
-    resume_tokens = set(resume_text.lower().split())
-    jd_tokens = set(jd_text.lower().split())
+    # Normalization: Standardizing text to lowercase and stripping punctuation
+    # We use a set-based comparison to identify unique word differences
+    resume_tokens = set(re.findall(r'\w+', resume_text.lower()))
+    jd_tokens = set(re.findall(r'\w+', jd_text.lower()))
 
-    # Identify tokens present in JD but absent in Resume
+    # Logical Operation: Finding tokens unique to the Job Description
     missing_elements = jd_tokens - resume_tokens
 
-    # Returning top 10 relevant keywords for optimization
-    return list(missing_elements)[:10]
+    # Noise Reduction: Filtering out standard English stop words to isolate technical skills
+    stop_words = {'and', 'the', 'with', 'for', 'from', 'this', 'that', 'should', 'have', 'must'}
+    refined_gaps = [word for word in missing_elements if word not in stop_words and len(word) > 2]
+
+    # Returning the most relevant identified gaps for the feedback report
+    return list(refined_gaps)[:10]
