@@ -4,6 +4,15 @@ from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import plotly.express as px  # Professional visualization for Recruiter
+import re  # Added for regex operations
+import spacy  # Added for robust NLP extraction
+
+# Try to load the spaCy English model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    st.error("SpaCy model not found. Please run: python -m spacy download en_core_web_sm")
+    nlp = None
 
 # Link to custom logic for DB interactions and AI processing
 from database_helper import (
@@ -38,6 +47,52 @@ st.markdown("""
 .step-box { background-color: #ffffff; padding: 20px; border-radius: 10px; border-left: 5px solid #007bff; box-shadow: 2px 2px 10px rgba(0,0,0,0.1); min-height: 150px; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# --- EXTRACTION HELPERS ---
+
+def extract_personal_info(text):
+    """
+    Extracts PII from resume text using Regex and spaCy NER.
+    """
+    # 1. Extract Email
+    email_match = re.search(r'[\w\.-]+@[\w\.-]+', text)
+    email = email_match.group(0) if email_match else "Not Found"
+
+    # 2. Extract Phone (Supports Sri Lankan & International formats)
+    phone_match = re.search(r'(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}', text)
+    phone = phone_match.group(0) if phone_match else "Not Found"
+
+    name = "Not Found"
+    location = "Not Found"
+
+    # 3. Extract Name and Location using spaCy NLP
+    if nlp:
+        doc = nlp(text)
+
+        # Find Location (GPE or LOC entities)
+        for ent in doc.ents:
+            if ent.label_ in ["GPE", "LOC"]:
+                location = ent.text.strip()
+                break  # Take the first found location
+
+        # Find Name (PERSON entity)
+        for ent in doc.ents:
+            if ent.label_ == "PERSON" and name == "Not Found":
+                # Ensure it's not a single word or a long paragraph
+                if "\n" not in ent.text and len(ent.text.split()) >= 2:
+                    name = ent.text.strip()
+
+    # Fallback for Name if spaCy couldn't find it
+    if name == "Not Found":
+        lines = [line.strip() for line in text.split('\n') if line.strip() and len(line.strip().split()) >= 2]
+        for line in lines:
+            # Skip lines with numbers, "resume", "cv", etc.
+            if not re.search(r'\d', line) and "resume" not in line.lower() and "cv" not in line.lower():
+                name = line
+                break
+
+    return name, email, phone, location
 
 
 # --- EXPORT HELPERS ---
@@ -130,6 +185,9 @@ def login_page():
 
 def register_page():
     """Captures new user data to create role-specific profiles."""
+    if st.button("Back"):
+        st.session_state['register_mode'] = False
+        st.rerun()
     st.title("Register Your Account")
     new_user = st.text_input("Full Name")
     new_email = st.text_input("Email")
@@ -152,13 +210,20 @@ def register_page():
 
 def job_seeker_dashboard():
     """Dashboard for individual candidates to perform self-analysis and gap identification."""
-    st.sidebar.title(f" {st.session_state['username']}")
+    st.markdown(f"""
+            <div style='text-align: center; padding: 10px;'>
+                <h3 style='color: #64748b; margin-bottom: 0;'>Welcome Back,</h3>
+                <h1 style='color: #1e293b; margin-top: 0;'>{st.session_state['username']}!</h1>
+            </div>
+        """, unsafe_allow_html=True)
+
+    st.write("---")
     if st.sidebar.button("Logout"):
         st.session_state.clear()
         st.rerun()
 
     st.title("Job Seeker Dashboard")
-    st.write("Analyze your resume and identify skill gaps using SBERT Technology.")
+    st.write("Analyze your resume and identify skill gaps.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -232,7 +297,14 @@ def job_seeker_dashboard():
 
 def recruiter_dashboard():
     """High-capacity portal for ranking batches of candidates against a target vacancy."""
-    st.sidebar.title(f" Recruiter: {st.session_state['username']}")
+    st.markdown(f"""
+            <div style='text-align: center; padding: 10px;'>
+                <h3 style='color: #64748b; margin-bottom: 0;'>Welcome Back,</h3>
+                <h1 style='color: #1e293b; margin-top: 0;'>{st.session_state['username']}!</h1>
+            </div>
+        """, unsafe_allow_html=True)
+
+    st.write("---")
     if st.sidebar.button("Logout"):
         st.session_state.clear()
         st.rerun()
@@ -254,34 +326,61 @@ def recruiter_dashboard():
     if st.button("Start Bulk Ranking"):
         if bulk_files and target_jd:
             results = []
+            db_save_results = []  # Keep a separate list of what goes to the DB
             p_bar = st.progress(0)
+
             with st.spinner(f"AI is processing {len(bulk_files)} candidates..."):
                 for i, file in enumerate(bulk_files):
                     # Loop for iterative processing of the batch
                     text = extract_text_from_pdf(file)
                     score = calculate_match_score(text, target_jd)
-                    results.append({"Candidate": file.name, "Score": score})
+
+                    # 1. Extract PII in-memory (Data Minimization)
+                    ext_name, ext_email, ext_phone, ext_location = extract_personal_info(text)
+
+                    # 2. Append full details for the UI and Export
+                    results.append({
+                        "File Name": file.name,
+                        "Candidate Name": ext_name,
+                        "Email": ext_email,
+                        "Phone": ext_phone,
+                        "Location": ext_location,
+                        "Score": score
+                    })
+
+                    # 3. Append ONLY File Name and Score for saving to the Database
+                    db_save_results.append({
+                        "Candidate": file.name,
+                        "Score": score
+                    })
+
                     p_bar.progress((i + 1) / len(bulk_files))
 
-            # Ranking candidates from top match to bottom
+            # Ranking candidates from top match to bottom for the UI
             sorted_results = sorted(results, key=lambda x: x['Score'], reverse=True)
-            # Store temporary results in session for persistence during save action
-            st.session_state['last_ranking_results'] = sorted_results
+
+            # Ranking candidates for the DB
+            sorted_db_results = sorted(db_save_results, key=lambda x: x['Score'], reverse=True)
+
+            # Store DB-safe results in session for persistence during save action
+            st.session_state['last_ranking_results'] = sorted_db_results
             st.session_state['last_jd_used'] = target_jd
 
+            # Create DataFrame for the UI (Includes PII)
             df = pd.DataFrame(sorted_results)
 
             st.write("---")
             st.subheader("Visual Ranking Analysis")
-            chart_col, table_col = st.columns([1.5, 1])
+            chart_col, table_col = st.columns([1, 2])
             with chart_col:
                 # Comparative bar chart via Plotly for visual decision making
-                fig = px.bar(df, x='Score', y='Candidate', orientation='h', title="Candidate Match Comparison",
+                fig = px.bar(df, x='Score', y='File Name', orientation='h', title="Candidate Match Comparison",
                              color='Score', color_continuous_scale='Blues', text='Score')
                 fig.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400)
                 st.plotly_chart(fig, use_container_width=True)
             with table_col:
-                st.write("**Top Candidates Leaderboard**")
+                st.write("**Top Candidates Leaderboard (Temporary View)**")
+                # Display DataFrame with PII
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
             st.write("---")
@@ -291,6 +390,7 @@ def recruiter_dashboard():
             stat2.metric("Highest Score", f"{df['Score'].max()}%")
             stat3.metric("Average Match", f"{round(df['Score'].mean(), 2)}%")
 
+            # Export CSV containing the PII
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("Export Full Ranking (CSV)", csv, "Candidate_Ranking.csv", "text/csv")
         else:
@@ -300,13 +400,15 @@ def recruiter_dashboard():
     if 'last_ranking_results' in st.session_state:
         st.write("---")
         st.subheader(" Save Shortlist Project")
+        st.info(
+            "Note: For data privacy, only File Names and Scores are saved. Personal info (Name/Email) will not be stored.")
         shortlist_name = st.text_input("Enter Project Name", placeholder="e.g., Software Engineer ")
 
         if st.button("Confirm and Save Shortlist"):
             if shortlist_name:
                 rec_id = st.session_state['user_id']
                 jd_val = st.session_state['last_jd_used']
-                data_val = st.session_state['last_ranking_results']
+                data_val = st.session_state['last_ranking_results']  # This only contains File Name and Score
 
                 # Committing the ranked list to permanent storage
                 if save_full_shortlist(rec_id, jd_val, shortlist_name, data_val):
