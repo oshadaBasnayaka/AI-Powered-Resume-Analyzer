@@ -1,11 +1,10 @@
 import mysql.connector
 
 
-# Centralized connection logic to handle MySQL access
 def get_db_connection():
     """
-    Main hub for database connectivity.
-    Returns a connection object for executing SQL queries.
+    Establish and return a MySQL database connection.
+    Returns None if the connection fails.
     """
     try:
         conn = mysql.connector.connect(
@@ -22,26 +21,28 @@ def get_db_connection():
 
 def save_analysis_to_db(user_id, resume_name, jd_text, score, gaps):
     """
-    This is the core storage logic for single resume analysis.
-    It links the JD and Resume to create a record in the junction table.
+    Save a single resume analysis result.
+    Inserts the JD, Resume, and links them in the analysis_results table.
     """
     db = get_db_connection()
     if not db: return False
+
     try:
         cursor = db.cursor()
 
-        # Step 1: Log the Job Description details first
+        # Insert the job description
         cursor.execute("INSERT INTO job_descriptions (job_title, jd_content, created_by) VALUES (%s, %s, %s)",
                        ("Analysis Target", jd_text, user_id))
         jd_id = cursor.lastrowid
 
-        # Step 2: Register the resume metadata
+        # Insert the resume metadata
         cursor.execute("INSERT INTO resumes (user_id, file_name) VALUES (%s, %s)", (user_id, resume_name))
         res_id = cursor.lastrowid
 
-        # Step 3: Insert the final calculated results into the junction table
-        # This maps IDs from JD and Resumes to maintain data integrity
+        # Convert gaps list to a comma-separated string if needed
         gaps_str = ", ".join(gaps) if isinstance(gaps, list) else gaps
+
+        # Save the final score and link the JD and Resume IDs
         cursor.execute(
             "INSERT INTO analysis_results (resume_id, jd_id, user_id, match_score, skill_gap_analysis) VALUES (%s, %s, %s, %s, %s)",
             (res_id, jd_id, user_id, score, gaps_str))
@@ -57,15 +58,21 @@ def save_analysis_to_db(user_id, resume_name, jd_text, score, gaps):
 
 def fetch_user_history(user_id):
     """
-    Retrieves the last 10 analysis records for the logged-in user.
-    Uses a JOIN to combine metadata with actual AI scores.
+    Get the 10 most recent resume analyses for a specific job seeker.
     """
     db = get_db_connection()
     if not db: return []
+
     try:
         cursor = db.cursor(dictionary=True)
-        # Pulling filenames and scores through the junction table
-        query = "SELECT r.file_name, a.match_score, a.skill_gap_analysis FROM analysis_results a JOIN resumes r ON a.resume_id = r.id WHERE a.user_id = %s ORDER BY a.id DESC LIMIT 10"
+        # Join analysis results with resumes to get filenames and scores
+        query = """
+            SELECT r.file_name, a.match_score, a.skill_gap_analysis 
+            FROM analysis_results a 
+            JOIN resumes r ON a.resume_id = r.id 
+            WHERE a.user_id = %s 
+            ORDER BY a.id DESC LIMIT 10
+        """
         cursor.execute(query, (user_id,))
         return cursor.fetchall()
     finally:
@@ -76,39 +83,38 @@ def fetch_user_history(user_id):
 
 def save_full_shortlist(recruiter_id, jd_text, title, candidates_list):
     """
-    Handles bulk saving for the Recruiter module.
-    Maintains the 1:N relationship between one shortlist project and multiple candidates.
+    Save a batch of ranked candidates as a shortlist for recruiters.
     """
     db = get_db_connection()
     if not db: return False
+
     try:
         cursor = db.cursor()
 
-        # Step 1: Create the main Job Description entry
+        # Create the JD entry
         cursor.execute("INSERT INTO job_descriptions (job_title, jd_content, created_by) VALUES (%s, %s, %s)",
                        (title, jd_text, recruiter_id))
         jd_id = cursor.lastrowid
 
-        # Step 2: Create the Shortlist project header
+        # Create the shortlist header
         cursor.execute("INSERT INTO shortlists (recruiter_id, jd_id, title) VALUES (%s, %s, %s)",
                        (recruiter_id, jd_id, title))
         shortlist_id = cursor.lastrowid
 
-        # Step 3: Iteratively save each candidate in the batch
-        # Using enumerate to track the loop index for the 'rank_order' field
+        # Loop through the ranked candidates and save them
         for rank, cand in enumerate(candidates_list, start=1):
-            # Log individual candidate resume
+            # Insert candidate resume
             cursor.execute("INSERT INTO resumes (user_id, file_name) VALUES (%s, %s)",
                            (recruiter_id, cand['Candidate']))
             res_id = cursor.lastrowid
 
-            # Save the specific analysis results for this candidate
+            # Save the match score for this candidate
             cursor.execute(
                 "INSERT INTO analysis_results (resume_id, jd_id, user_id, match_score) VALUES (%s, %s, %s, %s)",
                 (res_id, jd_id, recruiter_id, cand['Score']))
             analysis_id = cursor.lastrowid
 
-            # Map the candidate to the specific shortlist project with their rank
+            # Link the candidate to the shortlist with their specific rank
             cursor.execute(
                 "INSERT INTO shortlist_items (shortlist_id, resume_id, analysis_result_id, rank_order) VALUES (%s, %s, %s, %s)",
                 (shortlist_id, res_id, analysis_id, rank))
@@ -121,15 +127,21 @@ def save_full_shortlist(recruiter_id, jd_text, title, candidates_list):
 
 def fetch_recruiter_shortlists(recruiter_id):
     """
-    Retrieves all saved hiring projects for a specific recruiter.
-    Shows the project title linked with the targeted job vacancy.
+    Get all saved shortlists to display on the recruiter dashboard.
     """
     db = get_db_connection()
     if not db: return []
+
     try:
         cursor = db.cursor(dictionary=True)
-        # Combining Shortlist details with Job Titles using JD_ID
-        query = "SELECT s.id, s.title, j.job_title, s.created_at FROM shortlists s JOIN job_descriptions j ON s.jd_id = j.id WHERE s.recruiter_id = %s ORDER BY s.id DESC"
+        # Fetch shortlist details along with the targeted job title
+        query = """
+            SELECT s.id, s.title, j.job_title, s.created_at 
+            FROM shortlists s 
+            JOIN job_descriptions j ON s.jd_id = j.id 
+            WHERE s.recruiter_id = %s 
+            ORDER BY s.id DESC
+        """
         cursor.execute(query, (recruiter_id,))
         return cursor.fetchall()
     finally:

@@ -3,18 +3,18 @@ import pandas as pd
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-import plotly.express as px  # Professional visualization for Recruiter
-import re  # Added for regex operations
-import spacy  # Added for robust NLP extraction
+import plotly.express as px
+import re
+import spacy
 
-# Try to load the spaCy English model
+# Load the spaCy model. If it's missing, tell the user how to get it.
 try:
     nlp = spacy.load("en_core_web_sm")
 except OSError:
     st.error("SpaCy model not found. Please run: python -m spacy download en_core_web_sm")
     nlp = None
 
-# Link to custom logic for DB interactions and AI processing
+# Import our custom database functions and AI processing logic
 from database_helper import (
     get_db_connection,
     save_analysis_to_db,
@@ -24,10 +24,10 @@ from database_helper import (
 )
 from processor import extract_text_from_pdf, calculate_match_score, find_missing_skills
 
-# Global application configuration
+# Set up the basic Streamlit page config
 st.set_page_config(page_title="AI Resume Analyzer", layout="wide")
 
-# Persistent session state to manage user authentication and roles
+# Initialize session state variables if they don't exist yet
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 if 'user_role' not in st.session_state:
@@ -37,7 +37,7 @@ if 'username' not in st.session_state:
 if 'user_id' not in st.session_state:
     st.session_state['user_id'] = None
 
-# Custom CSS for branding and standardizing component spacing
+# Custom CSS to make the app look a bit cleaner
 st.markdown("""
 <style>
 .main { background-color: #f8f9fa; }
@@ -53,41 +53,42 @@ st.markdown("""
 
 def extract_personal_info(text):
     """
-    Extracts PII from resume text using Regex and spaCy NER.
+    Pulls out the candidate's personal details (Name, Email, Phone, Location)
+    from the resume text using a mix of regular expressions and spaCy.
     """
-    # 1. Extract Email
+    # Grab the email
     email_match = re.search(r'[\w\.-]+@[\w\.-]+', text)
     email = email_match.group(0) if email_match else "Not Found"
 
-    # 2. Extract Phone (Supports Sri Lankan & International formats)
+    # Grab the phone number (handles a few different formats)
     phone_match = re.search(r'(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}', text)
     phone = phone_match.group(0) if phone_match else "Not Found"
 
     name = "Not Found"
     location = "Not Found"
 
-    # 3. Extract Name and Location using spaCy NLP
+    # Let spaCy find the Name and Location if the model loaded successfully
     if nlp:
         doc = nlp(text)
 
-        # Find Location (GPE or LOC entities)
+        # Look for places (GPE or LOC)
         for ent in doc.ents:
             if ent.label_ in ["GPE", "LOC"]:
                 location = ent.text.strip()
-                break  # Take the first found location
+                break
 
-        # Find Name (PERSON entity)
+                # Look for a person's name
         for ent in doc.ents:
             if ent.label_ == "PERSON" and name == "Not Found":
-                # Ensure it's not a single word or a long paragraph
+                # Make sure it looks like a real name (at least two words, no newlines)
                 if "\n" not in ent.text and len(ent.text.split()) >= 2:
                     name = ent.text.strip()
 
-    # Fallback for Name if spaCy couldn't find it
+    # If spaCy couldn't find the name, try guessing it from the first few lines
     if name == "Not Found":
         lines = [line.strip() for line in text.split('\n') if line.strip() and len(line.strip().split()) >= 2]
         for line in lines:
-            # Skip lines with numbers, "resume", "cv", etc.
+            # Skip lines that have numbers or words like "resume"
             if not re.search(r'\d', line) and "resume" not in line.lower() and "cv" not in line.lower():
                 name = line
                 break
@@ -98,7 +99,7 @@ def extract_personal_info(text):
 # --- EXPORT HELPERS ---
 
 def generate_excel(resume_name, score, missing_skills):
-    """Converts raw analysis results into a structured Excel buffer for download."""
+    """Creates a simple Excel file with the analysis results."""
     output = BytesIO()
     df_data = pd.DataFrame([{
         "Resume Name": resume_name,
@@ -111,21 +112,25 @@ def generate_excel(resume_name, score, missing_skills):
 
 
 def generate_pdf(resume_name, score, missing_skills):
-    """Generates a formal PDF report using canvas coordinates for layout control."""
+    """Draws a basic PDF report summarizing the resume analysis."""
     buffer = BytesIO()
     p = canvas.Canvas(buffer, pagesize=letter)
     p.setFont("Helvetica-Bold", 16)
     p.drawString(100, 750, "Detailed Resume Analysis Report")
+
     p.setFont("Helvetica", 12)
     p.drawString(100, 720, f"Candidate Name: {st.session_state['username']}")
     p.drawString(100, 700, f"Target Resume: {resume_name}")
     p.drawString(100, 680, f"Semantic Match Score: {score}%")
     p.drawString(100, 650, "Skill Gaps Identified (Keywords Missing):")
+
     y_pos = 630
     for skill in missing_skills:
         p.drawString(120, y_pos, f"• {skill}")
         y_pos -= 20
+        # Don't run off the bottom of the page
         if y_pos < 50: break
+
     p.save()
     return buffer.getvalue()
 
@@ -133,26 +138,29 @@ def generate_pdf(resume_name, score, missing_skills):
 # --- AUTHENTICATION FLOWS ---
 
 def login_page():
-    """Handles user entry and redirects based on account types."""
+    """Shows the login screen and handles authentication against the DB."""
     st.markdown("<div class='main-title'>AI-Powered Resume Analyzer</div>", unsafe_allow_html=True)
     st.markdown("<div class='sub-title'>Log in to optimize your career journey or find the best talent</div>",
                 unsafe_allow_html=True)
+
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         email = st.text_input("Email Address")
         password = st.text_input("Password", type='password')
         btn_col1, btn_col2 = st.columns(2)
+
         with btn_col1:
             if st.button("Login"):
                 db = get_db_connection()
                 if db:
                     cursor = db.cursor(dictionary=True)
-                    # Cross-reference credentials with User table
+                    # Check if the user exists
                     query = "SELECT * FROM users WHERE email = %s AND password_hash = %s"
                     cursor.execute(query, (email, password))
                     user = cursor.fetchone()
+
                     if user:
-                        # Set session context for authorized access
+                        # Log them in and store their details in the session
                         st.session_state.update({
                             'logged_in': True,
                             'user_role': user['user_role'],
@@ -163,12 +171,15 @@ def login_page():
                     else:
                         st.error("Invalid credentials!")
                     db.close()
+
         with btn_col2:
             if st.button("New here? Register"):
                 st.session_state['register_mode'] = True
                 st.rerun()
+
     st.markdown("---")
-    # Quick onboarding guide for new users
+
+    # A quick guide explaining what the app does
     with st.expander("ℹ How it works? - System Overview", expanded=True):
         col_j, col_r = st.columns(2)
         with col_j:
@@ -184,20 +195,21 @@ def login_page():
 
 
 def register_page():
-    """Captures new user data to create role-specific profiles."""
+    """Shows the registration form to create a new user account."""
     if st.button("Back"):
         st.session_state['register_mode'] = False
         st.rerun()
+
     st.title("Register Your Account")
     new_user = st.text_input("Full Name")
     new_email = st.text_input("Email")
     new_password = st.text_input("Password", type='password')
     role = st.selectbox("I am a:", ["Job Seeker", "Recruiter"])
+
     if st.button("Create Account"):
         db = get_db_connection()
         if db:
             cursor = db.cursor()
-            # Direct insertion of profile metadata
             query = "INSERT INTO users (full_name, email, password_hash, user_role) VALUES (%s, %s, %s, %s)"
             cursor.execute(query, (new_user, new_email, new_password, role))
             db.commit()
@@ -209,7 +221,7 @@ def register_page():
 # --- USER DASHBOARDS ---
 
 def job_seeker_dashboard():
-    """Dashboard for individual candidates to perform self-analysis and gap identification."""
+    """The main view for a Job Seeker to upload their resume and see their match score."""
     st.markdown(f"""
             <div style='text-align: center; padding: 10px;'>
                 <h3 style='color: #64748b; margin-bottom: 0;'>Welcome Back,</h3>
@@ -227,31 +239,31 @@ def job_seeker_dashboard():
 
     col1, col2 = st.columns(2)
     with col1:
-        # File upload handling
         uploaded_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
     with col2:
-        # JD input handling
         jd_text = st.text_area("Paste Job Description (JD) here...", height=200)
 
     if st.button("Analyze Resume"):
         if uploaded_file and jd_text:
             with st.spinner("AI is analyzing your profile semantics..."):
-                # Execution of the NLP processing chain
+                # Extract text and run it through the NLP processor
                 resume_text = extract_text_from_pdf(uploaded_file)
-                score = calculate_match_score(resume_text, jd_text)  # SBERT comparison
-                missing = find_missing_skills(resume_text, jd_text)  # Gap analysis
+                score = calculate_match_score(resume_text, jd_text)
+                missing = find_missing_skills(resume_text, jd_text)
 
                 u_id = st.session_state['user_id']
-                # Saving to the analysis_results junction table for history tracking
+
+                # Try saving the result to the DB
                 if save_analysis_to_db(u_id, uploaded_file.name, jd_text, score, missing):
                     st.success("Analysis complete and synced with your database!")
 
-                    # Instant feedback display via a results grid
+                    # Show a quick summary table
                     result_data = {"Feature": ["Resume Name", "Match Score", "Status"],
                                    "Details": [uploaded_file.name, f"{score}%",
                                                "High Match" if score >= 70 else "Needs Optimization"]}
                     st.table(result_data)
 
+                    # List out what they are missing
                     st.subheader("Skill Gap Analysis")
                     if missing:
                         st.info("The following keywords were found in the JD but are missing from your Resume:")
@@ -261,6 +273,7 @@ def job_seeker_dashboard():
 
                     if score >= 70: st.balloons()
 
+                    # Provide download buttons
                     st.write("---")
                     st.subheader("Download Analysis Results")
                     d_col1, d_col2 = st.columns(2)
@@ -279,6 +292,8 @@ def job_seeker_dashboard():
 
     st.markdown("---")
     st.subheader("Your Analysis History")
+
+    # Pull their past results from the DB
     history = fetch_user_history(st.session_state['user_id'])
     if history:
         st.write("Review your previous resume analysis records:")
@@ -286,6 +301,7 @@ def job_seeker_dashboard():
         cols[0].write("**Resume Name**")
         cols[1].write("**Match Score**")
         cols[2].write("**Missing Skills**")
+
         for record in history:
             c1, c2, c3 = st.columns([2, 1, 3])
             c1.info(record['file_name'])
@@ -296,7 +312,7 @@ def job_seeker_dashboard():
 
 
 def recruiter_dashboard():
-    """High-capacity portal for ranking batches of candidates against a target vacancy."""
+    """The main view for a Recruiter to rank multiple candidates at once."""
     st.markdown(f"""
             <div style='text-align: center; padding: 10px;'>
                 <h3 style='color: #64748b; margin-bottom: 0;'>Welcome Back,</h3>
@@ -319,26 +335,24 @@ def recruiter_dashboard():
                                  placeholder="Paste requirements here...")
     with col_b:
         st.subheader("Candidate Resumes")
-        # Batch upload handling for 50-100 files
         bulk_files = st.file_uploader("Upload Resumes (Max 100 PDF files)", accept_multiple_files=True,
                                       type=["pdf"])
 
     if st.button("Start Bulk Ranking"):
         if bulk_files and target_jd:
             results = []
-            db_save_results = []  # Keep a separate list of what goes to the DB
+            db_save_results = []  # We keep a separate list for the DB to avoid saving personal info
             p_bar = st.progress(0)
 
             with st.spinner(f"AI is processing {len(bulk_files)} candidates..."):
                 for i, file in enumerate(bulk_files):
-                    # Loop for iterative processing of the batch
                     text = extract_text_from_pdf(file)
                     score = calculate_match_score(text, target_jd)
 
-                    # 1. Extract PII in-memory (Data Minimization)
+                    # Extract the personal details just for display
                     ext_name, ext_email, ext_phone, ext_location = extract_personal_info(text)
 
-                    # 2. Append full details for the UI and Export
+                    # Full details list (for the UI and CSV export)
                     results.append({
                         "File Name": file.name,
                         "Candidate Name": ext_name,
@@ -348,7 +362,7 @@ def recruiter_dashboard():
                         "Score": score
                     })
 
-                    # 3. Append ONLY File Name and Score for saving to the Database
+                    # Clean list (only filename and score go to the DB)
                     db_save_results.append({
                         "Candidate": file.name,
                         "Score": score
@@ -356,33 +370,33 @@ def recruiter_dashboard():
 
                     p_bar.progress((i + 1) / len(bulk_files))
 
-            # Ranking candidates from top match to bottom for the UI
+            # Sort both lists by score (highest first)
             sorted_results = sorted(results, key=lambda x: x['Score'], reverse=True)
-
-            # Ranking candidates for the DB
             sorted_db_results = sorted(db_save_results, key=lambda x: x['Score'], reverse=True)
 
-            # Store DB-safe results in session for persistence during save action
+            # Save the clean results to session state in case the recruiter wants to save the project later
             st.session_state['last_ranking_results'] = sorted_db_results
             st.session_state['last_jd_used'] = target_jd
 
-            # Create DataFrame for the UI (Includes PII)
+            # Display the results
             df = pd.DataFrame(sorted_results)
 
             st.write("---")
             st.subheader("Visual Ranking Analysis")
             chart_col, table_col = st.columns([1, 2])
+
             with chart_col:
-                # Comparative bar chart via Plotly for visual decision making
+                # Plotly bar chart
                 fig = px.bar(df, x='Score', y='File Name', orientation='h', title="Candidate Match Comparison",
                              color='Score', color_continuous_scale='Blues', text='Score')
                 fig.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400)
                 st.plotly_chart(fig, use_container_width=True)
+
             with table_col:
                 st.write("**Top Candidates Leaderboard (Temporary View)**")
-                # Display DataFrame with PII
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
+            # Show some quick stats about the batch
             st.write("---")
             st.subheader("Quick Statistics")
             stat1, stat2, stat3 = st.columns(3)
@@ -390,7 +404,7 @@ def recruiter_dashboard():
             stat2.metric("Highest Score", f"{df['Score'].max()}%")
             stat3.metric("Average Match", f"{round(df['Score'].mean(), 2)}%")
 
-            # Export CSV containing the PII
+            # Let them download the full report with emails and phones
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("Export Full Ranking (CSV)", csv, "Candidate_Ranking.csv", "text/csv")
         else:
@@ -402,15 +416,15 @@ def recruiter_dashboard():
         st.subheader(" Save Shortlist Project")
         st.info(
             "Note: For data privacy, only File Names and Scores are saved. Personal info (Name/Email) will not be stored.")
+
         shortlist_name = st.text_input("Enter Project Name", placeholder="e.g., Software Engineer ")
 
         if st.button("Confirm and Save Shortlist"):
             if shortlist_name:
                 rec_id = st.session_state['user_id']
                 jd_val = st.session_state['last_jd_used']
-                data_val = st.session_state['last_ranking_results']  # This only contains File Name and Score
+                data_val = st.session_state['last_ranking_results']
 
-                # Committing the ranked list to permanent storage
                 if save_full_shortlist(rec_id, jd_val, shortlist_name, data_val):
                     st.success(f"Shortlist '{shortlist_name}' saved successfully!")
                     st.rerun()
@@ -426,24 +440,23 @@ def recruiter_dashboard():
 
     if saved_shortlists:
         for slist in saved_shortlists:
-            # Displaying each hiring project within an expandable section
+            # Show each saved project in a dropdown expander
             with st.expander(f" {slist['title']} (For: {slist['job_title']})"):
                 st.write(f"Shortlist ID: {slist['id']} | Created: {slist['created_at']}")
 
-                # Dynamically fetching the ranked items for the selected shortlist
+                # Grab the candidates for this specific project
                 db = get_db_connection()
                 cur = db.cursor(dictionary=True)
-                # Query using backticks for Rank to avoid MySQL syntax conflicts
                 cur.execute("""
-                                        SELECT si.rank_order as `Rank`, 
-                                               r.file_name as Candidate, 
-                                               ar.match_score as `AI Score`
-                                        FROM shortlist_items si
-                                        JOIN resumes r ON si.resume_id = r.id
-                                        JOIN analysis_results ar ON si.analysis_result_id = ar.id
-                                        WHERE si.shortlist_id = %s
-                                        ORDER BY si.rank_order ASC
-                                    """, (slist['id'],))
+                    SELECT si.rank_order as `Rank`, 
+                           r.file_name as Candidate, 
+                           ar.match_score as `AI Score`
+                    FROM shortlist_items si
+                    JOIN resumes r ON si.resume_id = r.id
+                    JOIN analysis_results ar ON si.analysis_result_id = ar.id
+                    WHERE si.shortlist_id = %s
+                    ORDER BY si.rank_order ASC
+                """, (slist['id'],))
                 items = cur.fetchall()
                 db.close()
 
@@ -462,7 +475,6 @@ if not st.session_state['logged_in']:
     else:
         login_page()
 else:
-    # Dashboard redirect based on account user_role
     if st.session_state['user_role'] == "Job Seeker":
         job_seeker_dashboard()
     else:
