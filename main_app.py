@@ -6,6 +6,7 @@ from reportlab.pdfgen import canvas
 import plotly.express as px
 import re
 import spacy
+import hashlib
 
 # Load the spaCy model. If it's missing, tell the user how to get it.
 try:
@@ -47,6 +48,13 @@ st.markdown("""
 .step-box { background-color: #ffffff; padding: 20px; border-radius: 10px; border-left: 5px solid #007bff; box-shadow: 2px 2px 10px rgba(0,0,0,0.1); min-height: 150px; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# --- SECURITY HELPER ---
+
+def hash_password(password):
+    """Hashes a password using SHA-256 for secure database storage."""
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
 # --- EXTRACTION HELPERS ---
@@ -154,9 +162,13 @@ def login_page():
                 db = get_db_connection()
                 if db:
                     cursor = db.cursor(dictionary=True)
-                    # Check if the user exists
+
+                    # Hash the entered password to compare with the DB
+                    hashed_attempt = hash_password(password)
+
+                    # Check if the user exists with the matching hashed password
                     query = "SELECT * FROM users WHERE email = %s AND password_hash = %s"
-                    cursor.execute(query, (email, password))
+                    cursor.execute(query, (email, hashed_attempt))
                     user = cursor.fetchone()
 
                     if user:
@@ -207,15 +219,22 @@ def register_page():
     role = st.selectbox("I am a:", ["Job Seeker", "Recruiter"])
 
     if st.button("Create Account"):
-        db = get_db_connection()
-        if db:
-            cursor = db.cursor()
-            query = "INSERT INTO users (full_name, email, password_hash, user_role) VALUES (%s, %s, %s, %s)"
-            cursor.execute(query, (new_user, new_email, new_password, role))
-            db.commit()
-            st.success("Registration successful! Please login.")
-            st.session_state['register_mode'] = False
-            st.rerun()
+        if new_user and new_email and new_password:
+            db = get_db_connection()
+            if db:
+                cursor = db.cursor()
+
+                # Hash the password before saving it to the database
+                secure_password = hash_password(new_password)
+
+                query = "INSERT INTO users (full_name, email, password_hash, user_role) VALUES (%s, %s, %s, %s)"
+                cursor.execute(query, (new_user, new_email, secure_password, role))
+                db.commit()
+                st.success("Registration successful! Please login.")
+                st.session_state['register_mode'] = False
+                st.rerun()
+        else:
+            st.warning("Please fill in all the fields.")
 
 
 # --- USER DASHBOARDS ---
